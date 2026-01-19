@@ -1,0 +1,7 @@
+{
+  "name": "d3-whitepay-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {}
+}
