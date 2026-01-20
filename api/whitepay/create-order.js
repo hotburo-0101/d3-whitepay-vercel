@@ -11,7 +11,6 @@ function sendJson(res, status, data) {
 }
 
 function setCors(req, res) {
-  // Можеш звузити до конкретного домену Framer, але для старту ставимо *
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -27,10 +26,55 @@ function makeExternalOrderId(tariffId) {
   return `d3_${tariffId}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`
 }
 
+/** Airtable helpers */
+function getAirtableConfig() {
+  const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
+  const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
+  const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
+
+  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
+    return null
+  }
+  return { AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE }
+}
+
+async function airtableCreateOrderRecord(fields) {
+  const cfg = getAirtableConfig()
+  if (!cfg) return { ok: false, skipped: true, reason: "Missing Airtable env vars" }
+
+  const { AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE } = cfg
+  const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(
+    AIRTABLE_TABLE
+  )}`
+
+  const r = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ records: [{ fields }] }),
+  })
+
+  const text = await r.text()
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    data = { raw: text }
+  }
+
+  if (!r.ok) {
+    return { ok: false, status: r.status, data }
+  }
+
+  const recordId = data?.records?.[0]?.id
+  return { ok: true, recordId, data }
+}
+
 module.exports = async (req, res) => {
   setCors(req, res)
 
-  // ✅ IMPORTANT: preflight
   if (req.method === "OPTIONS") {
     res.statusCode = 204
     return res.end()
@@ -60,7 +104,7 @@ module.exports = async (req, res) => {
 
   const tariffId = safeString(body.tariffId, 32)
   const email = safeString(body.email, 255)
-  const name = safeString(body.name, 255) // лишаємо, якщо потім захочеш логувати/зберігати у себе
+  const name = safeString(body.name, 255)
 
   if (!TARIFFS[tariffId]) return sendJson(res, 400, { error: "Invalid tariffId" })
   if (!email) return sendJson(res, 400, { error: "Email is required" })
@@ -71,23 +115,20 @@ module.exports = async (req, res) => {
 
   const url = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(WHITEPAY_SLUG)}`
 
-  // ✅ Опис, який має бути в інвойсі
   const paymentDesc = `Оплата за тариф "${tariffTitle}"`
-
   const payload = {
     amount: String(amount),
     currency: "USDT",
     external_order_id,
     email,
-
-    // це видно як опис у Whitepay
     description: `${paymentDesc} — D3 Education`,
-
-    successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-    failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-
-    // ⚠️ У тебе саме це поле підтягувалося як "Опис платежу" (і ти туди ставив name)
-    // Тепер ставимо правильний текст
+    successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(
+      external_order_id
+    )}`,
+    failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(
+      external_order_id
+    )}`,
+    // у тебе саме воно підтягується як "Опис платежу"
     form_additional_data: paymentDesc,
   }
 
@@ -126,13 +167,31 @@ module.exports = async (req, res) => {
     return sendJson(res, 502, { error: "Whitepay response missing acquiring_url/id", data })
   }
 
+  // ✅ пишемо pending в Airtable
+  const nowIso = new Date().toISOString()
+  const airtableRes = await airtableCreateOrderRecord({
+    "External Order ID": external_order_id,
+    "Whitepay Order ID": String(whitepay_order_id),
+    Email: email,
+    Name: name || "",
+    "Tariff ID": tariffId,
+    "Tariff Title": tariffTitle,
+    "Amount USDT": Number(amount),
+    Currency: "USDT",
+    Status: "pending",
+    "Acquiring URL": acquiring_url,
+    "Created At": nowIso,
+  })
+
   return sendJson(res, 200, {
     ok: true,
     tariffId,
+    tariffTitle,
     amount_usdt: amount,
     external_order_id,
     whitepay_order_id,
     status,
     acquiring_url,
+    airtable: airtableRes,
   })
 }
