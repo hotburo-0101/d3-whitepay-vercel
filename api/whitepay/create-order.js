@@ -88,7 +88,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  const tariffId = safeString(body.tariffId, 32)
+  const tariffId = safeString(body.tariffId ?? body.tariff_id ?? body.tariff, 32)
   const email = safeString(body.email, 255)
   const name = safeString(body.name, 255)
   const phone = safeString(body.phone, 64)
