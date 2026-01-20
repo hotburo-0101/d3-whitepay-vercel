@@ -2,7 +2,7 @@ const crypto = require("crypto")
 
 function sendJson(res, status, data) {
   res.statusCode = status
-  res.setHeader("Content-Type", "application/json")
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
   res.end(JSON.stringify(data))
 }
 
@@ -10,6 +10,11 @@ function sendJson(res, status, data) {
 function calcSignature(body, secret) {
   const json = JSON.stringify(body).replace(/\//g, "\\/")
   return crypto.createHmac("sha256", secret).update(json).digest("hex")
+}
+
+function getHeader(req, name) {
+  const key = String(name || "").toLowerCase()
+  return req.headers[key] || req.headers[name] || ""
 }
 
 module.exports = async (req, res) => {
@@ -30,11 +35,8 @@ module.exports = async (req, res) => {
     }
   }
 
-  const signature =
-    req.headers["signature"] ||
-    req.headers["Signature"] ||
-    req.headers["SIGNATURE"] ||
-    ""
+  // Whitepay header: "Signature"
+  const signature = getHeader(req, "signature")
 
   const expected = calcSignature(body, WHITEPAY_WEBHOOK_SECRET)
 
@@ -44,12 +46,22 @@ module.exports = async (req, res) => {
 
   // Під різні webhook-пейлоади дістаємо order/status максимально безпечно
   const order = body.order || body.data?.order || body.crypto_order || body
-  const status = String(order?.status || body.status || "").toUpperCase()
+
+  const statusRaw = String(order?.status || body.status || "")
+  const status = statusRaw.trim().toLowerCase()
+
   const whitepay_order_id = String(order?.id || "")
   const external_order_id = String(order?.external_order_id || "")
 
-  // SUCCESS CASE
-  if (status === "COMPLETE") {
+  // ✅ metadata з create-order (tariffId/email/name)
+  const metadata = order?.metadata || body?.metadata || {}
+  const tariffId = String(metadata.tariffId || "")
+  const email = String(metadata.email || "").toLowerCase()
+  const name = String(metadata.name || "")
+
+  const isPaid = ["complete", "completed", "paid", "success"].includes(status)
+
+  if (isPaid) {
     // Тут далі: (1) зафіксувати оплату (2) додати в email-сервіс (3) відправити доступ
     // Поки повертаємо OK, щоб Whitepay не ретраїв webhook.
     return sendJson(res, 200, {
@@ -58,6 +70,7 @@ module.exports = async (req, res) => {
       status,
       whitepay_order_id,
       external_order_id,
+      metadata: { tariffId, email, name },
     })
   }
 
@@ -67,5 +80,6 @@ module.exports = async (req, res) => {
     status,
     whitepay_order_id,
     external_order_id,
+    metadata: { tariffId, email, name },
   })
 }
