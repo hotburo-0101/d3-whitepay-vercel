@@ -6,8 +6,17 @@ const TARIFFS = {
 
 function sendJson(res, status, data) {
   res.statusCode = status
-  res.setHeader("Content-Type", "application/json; charset=utf-8")
+  res.setHeader("Content-Type", "application/json")
   res.end(JSON.stringify(data))
+}
+
+function setCors(req, res) {
+  // Можеш звузити до конкретного домену Framer, але для старту ставимо *
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+  // optional
+  res.setHeader("Access-Control-Max-Age", "86400")
 }
 
 function safeString(v, max = 255) {
@@ -20,11 +29,19 @@ function makeExternalOrderId(tariffId) {
 }
 
 module.exports = async (req, res) => {
+  setCors(req, res)
+
+  // ✅ IMPORTANT: preflight
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204
+    return res.end()
+  }
+
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" })
 
   const WHITEPAY_API_TOKEN = process.env.WHITEPAY_API_TOKEN
-  const WHITEPAY_SLUG = process.env.WHITEPAY_SLUG // у тебе: d3-education
-  const SITE_URL = process.env.SITE_URL // https://d3.education
+  const WHITEPAY_SLUG = process.env.WHITEPAY_SLUG
+  const SITE_URL = process.env.SITE_URL
 
   if (!WHITEPAY_API_TOKEN || !WHITEPAY_SLUG || !SITE_URL) {
     return sendJson(res, 500, {
@@ -33,7 +50,6 @@ module.exports = async (req, res) => {
     })
   }
 
-  // Vercel зазвичай дає req.body як object, але підстрахуємось
   let body = req.body
   if (!body || typeof body !== "object") {
     try {
@@ -44,35 +60,26 @@ module.exports = async (req, res) => {
   }
 
   const tariffId = safeString(body.tariffId, 32)
-  const email = safeString(body.email, 255).toLowerCase()
+  const email = safeString(body.email, 255)
   const name = safeString(body.name, 255)
 
   if (!TARIFFS[tariffId]) return sendJson(res, 400, { error: "Invalid tariffId" })
   if (!email) return sendJson(res, 400, { error: "Email is required" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-  const amountUsd = TARIFFS[tariffId].usd
+  const amount = TARIFFS[tariffId].usd
 
-  // Whitepay create crypto-order (payment page slug)
   const url = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(WHITEPAY_SLUG)}`
 
   const payload = {
-    amount: String(amountUsd),
-    currency: "USD",
+    amount: String(amount),
+    currency: "USDT",
     external_order_id,
-
-    description: `D3 Education — ${TARIFFS[tariffId].title} (${amountUsd}$)`,
-
-    // ✅ гарантія що ці дані прийдуть у webhook
-    metadata: {
-      tariffId,
-      email,
-      name: name || "",
-    },
-
-    // ці лінки потрібні, щоб Whitepay повертав на твій сайт після оплати/помилки
+    email,
+    description: `D3 Education — ${TARIFFS[tariffId].title} (${amount}$)`,
     successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
     failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
+    form_additional_data: name || undefined,
   }
 
   let r
@@ -94,7 +101,7 @@ module.exports = async (req, res) => {
   let data
   try {
     data = JSON.parse(text)
-  } catch {
+  } catch (e) {
     data = { raw: text }
   }
 
@@ -113,7 +120,7 @@ module.exports = async (req, res) => {
   return sendJson(res, 200, {
     ok: true,
     tariffId,
-    amount_usd: amountUsd,
+    amount_usdt: amount,
     external_order_id,
     whitepay_order_id,
     status,
