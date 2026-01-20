@@ -2,22 +2,30 @@ const crypto = require("crypto")
 
 function sendJson(res, status, data) {
   res.statusCode = status
-  res.setHeader("Content-Type", "application/json; charset=utf-8")
+  res.setHeader("Content-Type", "application/json")
   res.end(JSON.stringify(data))
 }
 
-// Signature = HMAC_SHA256(JSON.stringify(body).replace(/\//g, "\\/"), secret)
+function setCors(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Signature")
+  res.setHeader("Access-Control-Max-Age", "86400")
+}
+
 function calcSignature(body, secret) {
   const json = JSON.stringify(body).replace(/\//g, "\\/")
   return crypto.createHmac("sha256", secret).update(json).digest("hex")
 }
 
-function getHeader(req, name) {
-  const key = String(name || "").toLowerCase()
-  return req.headers[key] || req.headers[name] || ""
-}
-
 module.exports = async (req, res) => {
+  setCors(req, res)
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204
+    return res.end()
+  }
+
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" })
 
   const WHITEPAY_WEBHOOK_SECRET = process.env.WHITEPAY_WEBHOOK_SECRET
@@ -25,7 +33,6 @@ module.exports = async (req, res) => {
     return sendJson(res, 500, { error: "Missing env var WHITEPAY_WEBHOOK_SECRET" })
   }
 
-  // Vercel зазвичай дає req.body як object
   let body = req.body
   if (!body || typeof body !== "object") {
     try {
@@ -35,8 +42,11 @@ module.exports = async (req, res) => {
     }
   }
 
-  // Whitepay header: "Signature"
-  const signature = getHeader(req, "signature")
+  const signature =
+    req.headers["signature"] ||
+    req.headers["Signature"] ||
+    req.headers["SIGNATURE"] ||
+    ""
 
   const expected = calcSignature(body, WHITEPAY_WEBHOOK_SECRET)
 
@@ -44,33 +54,18 @@ module.exports = async (req, res) => {
     return sendJson(res, 401, { error: "Invalid signature" })
   }
 
-  // Під різні webhook-пейлоади дістаємо order/status максимально безпечно
   const order = body.order || body.data?.order || body.crypto_order || body
-
-  const statusRaw = String(order?.status || body.status || "")
-  const status = statusRaw.trim().toLowerCase()
-
+  const status = String(order?.status || body.status || "").toUpperCase()
   const whitepay_order_id = String(order?.id || "")
   const external_order_id = String(order?.external_order_id || "")
 
-  // ✅ metadata з create-order (tariffId/email/name)
-  const metadata = order?.metadata || body?.metadata || {}
-  const tariffId = String(metadata.tariffId || "")
-  const email = String(metadata.email || "").toLowerCase()
-  const name = String(metadata.name || "")
-
-  const isPaid = ["complete", "completed", "paid", "success"].includes(status)
-
-  if (isPaid) {
-    // Тут далі: (1) зафіксувати оплату (2) додати в email-сервіс (3) відправити доступ
-    // Поки повертаємо OK, щоб Whitepay не ретраїв webhook.
+  if (status === "COMPLETE") {
     return sendJson(res, 200, {
       ok: true,
       handled: "paid",
       status,
       whitepay_order_id,
       external_order_id,
-      metadata: { tariffId, email, name },
     })
   }
 
@@ -80,6 +75,5 @@ module.exports = async (req, res) => {
     status,
     whitepay_order_id,
     external_order_id,
-    metadata: { tariffId, email, name },
   })
 }
