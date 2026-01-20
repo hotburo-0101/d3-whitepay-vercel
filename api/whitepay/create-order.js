@@ -6,7 +6,7 @@ const TARIFFS = {
 
 function sendJson(res, status, data) {
   res.statusCode = status
-  res.setHeader("Content-Type", "application/json")
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
   res.end(JSON.stringify(data))
 }
 
@@ -33,6 +33,7 @@ module.exports = async (req, res) => {
     })
   }
 
+  // Vercel зазвичай дає req.body як object, але підстрахуємось
   let body = req.body
   if (!body || typeof body !== "object") {
     try {
@@ -43,29 +44,35 @@ module.exports = async (req, res) => {
   }
 
   const tariffId = safeString(body.tariffId, 32)
-  const email = safeString(body.email, 255)
+  const email = safeString(body.email, 255).toLowerCase()
   const name = safeString(body.name, 255)
 
   if (!TARIFFS[tariffId]) return sendJson(res, 400, { error: "Invalid tariffId" })
   if (!email) return sendJson(res, 400, { error: "Email is required" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-  const amount = TARIFFS[tariffId].usd
+  const amountUsd = TARIFFS[tariffId].usd
 
   // Whitepay create crypto-order (payment page slug)
   const url = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(WHITEPAY_SLUG)}`
 
   const payload = {
-    amount: String(amount),
-    currency: "USDT",
+    amount: String(amountUsd),
+    currency: "USD",
     external_order_id,
-    email,
-    description: `D3 Education — ${TARIFFS[tariffId].title} (${amount}$)`,
+
+    description: `D3 Education — ${TARIFFS[tariffId].title} (${amountUsd}$)`,
+
+    // ✅ гарантія що ці дані прийдуть у webhook
+    metadata: {
+      tariffId,
+      email,
+      name: name || "",
+    },
+
     // ці лінки потрібні, щоб Whitepay повертав на твій сайт після оплати/помилки
     successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
     failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-    // необов’язково, але зручно передати ім’я
-    form_additional_data: name || undefined,
   }
 
   let r
@@ -87,7 +94,7 @@ module.exports = async (req, res) => {
   let data
   try {
     data = JSON.parse(text)
-  } catch (e) {
+  } catch {
     data = { raw: text }
   }
 
@@ -103,11 +110,10 @@ module.exports = async (req, res) => {
     return sendJson(res, 502, { error: "Whitepay response missing acquiring_url/id", data })
   }
 
-  // Тут можна зберігати pending-замовлення (пізніше додамо базу/таблицю)
   return sendJson(res, 200, {
     ok: true,
     tariffId,
-    amount_usdt: amount,
+    amount_usd: amountUsd,
     external_order_id,
     whitepay_order_id,
     status,
