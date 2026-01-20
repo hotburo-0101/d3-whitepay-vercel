@@ -15,7 +15,6 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
-  // optional
   res.setHeader("Access-Control-Max-Age", "86400")
 }
 
@@ -61,25 +60,35 @@ module.exports = async (req, res) => {
 
   const tariffId = safeString(body.tariffId, 32)
   const email = safeString(body.email, 255)
-  const name = safeString(body.name, 255)
+  const name = safeString(body.name, 255) // лишаємо, якщо потім захочеш логувати/зберігати у себе
 
   if (!TARIFFS[tariffId]) return sendJson(res, 400, { error: "Invalid tariffId" })
   if (!email) return sendJson(res, 400, { error: "Email is required" })
 
   const external_order_id = makeExternalOrderId(tariffId)
   const amount = TARIFFS[tariffId].usd
+  const tariffTitle = TARIFFS[tariffId].title
 
   const url = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(WHITEPAY_SLUG)}`
+
+  // ✅ Опис, який має бути в інвойсі
+  const paymentDesc = `Оплата за тариф "${tariffTitle}"`
 
   const payload = {
     amount: String(amount),
     currency: "USDT",
     external_order_id,
     email,
-    description: `D3 Education — ${TARIFFS[tariffId].title} (${amount}$)`,
+
+    // це видно як опис у Whitepay
+    description: `${paymentDesc} — D3 Education`,
+
     successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
     failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-    form_additional_data: name || undefined,
+
+    // ⚠️ У тебе саме це поле підтягувалося як "Опис платежу" (і ти туди ставив name)
+    // Тепер ставимо правильний текст
+    form_additional_data: paymentDesc,
   }
 
   let r
