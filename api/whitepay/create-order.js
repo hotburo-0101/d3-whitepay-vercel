@@ -168,7 +168,6 @@ const fields = {
   "Acquiring URL": acquiring_url,
 
   customer_name: name || "",
-  created_at: new Date().toISOString(),
 };
 
 
