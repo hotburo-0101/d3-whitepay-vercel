@@ -7,7 +7,6 @@ function sendJson(res, status, data) {
 }
 
 function setCors(req, res) {
-  // webhooks приходять з серверів, CORS не критичний, але хай буде ок
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Signature")
@@ -20,83 +19,72 @@ function calcSignature(body, secret) {
   return crypto.createHmac("sha256", secret).update(json).digest("hex")
 }
 
-/** Airtable helpers */
-function getAirtableConfig() {
-  const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
-  const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
-  const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
-  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) return null
-  return { AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE }
+function mapWhitepayStatusToCrm(statusUpper) {
+  // Підлаштовано під CRM-статуси
+  if (statusUpper === "COMPLETE" || statusUpper === "PAID") return "PAID"
+  if (statusUpper === "FAILED" || statusUpper === "CANCELED" || statusUpper === "CANCELLED" || statusUpper === "EXPIRED")
+    return "FAILED"
+  return "PENDING"
 }
 
-async function airtableFindRecordIdByExternalOrderId(externalOrderId) {
-  const cfg = getAirtableConfig()
-  if (!cfg) return { ok: false, skipped: true, reason: "Missing Airtable env vars" }
+async function airtableFindByExternalOrderId({ baseId, tableName, token, externalOrderId }) {
+  const formula = `{External Order ID}="${String(externalOrderId).replace(/"/g, '\\"')}"`
+  const url =
+    `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}` +
+    `?maxRecords=1&filterByFormula=${encodeURIComponent(formula)}`
 
-  const { AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE } = cfg
-  const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(
-    AIRTABLE_TABLE
-  )}?filterByFormula=${encodeURIComponent(`{External Order ID}='${externalOrderId}'`)}&maxRecords=1`
-
-  const r = await fetch(endpoint, {
+  const r = await fetch(url, {
     method: "GET",
-    headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` },
+    headers: { Authorization: `Bearer ${token}` },
   })
-
-  const text = await r.text()
-  let data
-  try {
-    data = JSON.parse(text)
-  } catch (e) {
-    data = { raw: text }
+  const data = await r.json().catch(() => null)
+  if (!r.ok) {
+    const err = new Error("Airtable find failed")
+    err.details = data
+    err.status = r.status
+    throw err
   }
-
-  if (!r.ok) return { ok: false, status: r.status, data }
-
-  const recordId = data?.records?.[0]?.id
-  if (!recordId) return { ok: false, notFound: true, data }
-
-  return { ok: true, recordId }
+  return data?.records?.[0] || null
 }
 
-async function airtableUpdateRecord(recordId, fields) {
-  const cfg = getAirtableConfig()
-  if (!cfg) return { ok: false, skipped: true, reason: "Missing Airtable env vars" }
+async function airtableFindByWhitepayOrderId({ baseId, tableName, token, whitepayOrderId }) {
+  const formula = `{Whitepay Order ID}="${String(whitepayOrderId).replace(/"/g, '\\"')}"`
+  const url =
+    `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}` +
+    `?maxRecords=1&filterByFormula=${encodeURIComponent(formula)}`
 
-  const { AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE } = cfg
-  const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(
-    AIRTABLE_TABLE
-  )}/${encodeURIComponent(recordId)}`
+  const r = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const data = await r.json().catch(() => null)
+  if (!r.ok) {
+    const err = new Error("Airtable find failed")
+    err.details = data
+    err.status = r.status
+    throw err
+  }
+  return data?.records?.[0] || null
+}
 
-  const r = await fetch(endpoint, {
+async function airtableUpdateRecord({ baseId, tableName, token, recordId, fields }) {
+  const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}/${encodeURIComponent(recordId)}`
+  const r = await fetch(url, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ fields }),
   })
-
-  const text = await r.text()
-  let data
-  try {
-    data = JSON.parse(text)
-  } catch (e) {
-    data = { raw: text }
+  const data = await r.json().catch(() => null)
+  if (!r.ok) {
+    const err = new Error("Airtable update failed")
+    err.details = data
+    err.status = r.status
+    throw err
   }
-
-  if (!r.ok) return { ok: false, status: r.status, data }
-  return { ok: true, data }
-}
-
-// нормалізація статусів Whitepay -> наші
-function mapStatusToCrm(statusUpper) {
-  // найважливіше: COMPLETE = paid
-  if (statusUpper === "COMPLETE") return "paid"
-  if (statusUpper === "FAILED") return "failed"
-  if (statusUpper === "EXPIRED") return "expired"
-  // інші: PENDING/PROCESSING тощо
-  return "pending"
+  return data
 }
 
 module.exports = async (req, res) => {
@@ -110,8 +98,18 @@ module.exports = async (req, res) => {
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" })
 
   const WHITEPAY_WEBHOOK_SECRET = process.env.WHITEPAY_WEBHOOK_SECRET
+  const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
+  const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
+  const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
+
   if (!WHITEPAY_WEBHOOK_SECRET) {
     return sendJson(res, 500, { error: "Missing env var WHITEPAY_WEBHOOK_SECRET" })
+  }
+  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
+    return sendJson(res, 500, {
+      error: "Missing Airtable env vars",
+      required: ["AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE"],
+    })
   }
 
   let body = req.body
@@ -130,66 +128,84 @@ module.exports = async (req, res) => {
     ""
 
   const expected = calcSignature(body, WHITEPAY_WEBHOOK_SECRET)
+
   if (!signature || String(signature) !== expected) {
     return sendJson(res, 401, { error: "Invalid signature" })
   }
 
-  // Під різні webhook-пейлоади дістаємо order/status максимально безпечно
   const order = body.order || body.data?.order || body.crypto_order || body
   const statusUpper = String(order?.status || body.status || "").toUpperCase()
+
   const whitepay_order_id = String(order?.id || "")
   const external_order_id = String(order?.external_order_id || "")
 
-  if (!external_order_id) {
-    // якщо нема external_order_id — нам нема чим матчити в Airtable
-    return sendJson(res, 200, {
-      ok: true,
-      handled: "ignored",
-      reason: "missing external_order_id",
-      status: statusUpper,
-      whitepay_order_id,
+  const crmStatus = mapWhitepayStatusToCrm(statusUpper)
+
+  // ✅ Знайдемо запис у Airtable і оновимо статус
+  try {
+    let rec = null
+
+    if (external_order_id) {
+      rec = await airtableFindByExternalOrderId({
+        baseId: AIRTABLE_BASE_ID,
+        tableName: AIRTABLE_TABLE,
+        token: AIRTABLE_TOKEN,
+        externalOrderId: external_order_id,
+      })
+    }
+
+    if (!rec && whitepay_order_id) {
+      rec = await airtableFindByWhitepayOrderId({
+        baseId: AIRTABLE_BASE_ID,
+        tableName: AIRTABLE_TABLE,
+        token: AIRTABLE_TOKEN,
+        whitepayOrderId: whitepay_order_id,
+      })
+    }
+
+    if (!rec) {
+      // Не валимо webhook — Whitepay не має ретраїти нескінченно
+      return sendJson(res, 200, {
+        ok: true,
+        handled: "no_record",
+        status: statusUpper,
+        crmStatus,
+        whitepay_order_id,
+        external_order_id,
+      })
+    }
+
+    await airtableUpdateRecord({
+      baseId: AIRTABLE_BASE_ID,
+      tableName: AIRTABLE_TABLE,
+      token: AIRTABLE_TOKEN,
+      recordId: rec.id,
+      fields: {
+        status: crmStatus,
+        "Whitepay Order ID": whitepay_order_id || rec.fields?.["Whitepay Order ID"] || "",
+        "External Order ID": external_order_id || rec.fields?.["External Order ID"] || "",
+      },
     })
-  }
 
-  const crmStatus = mapStatusToCrm(statusUpper)
-  const nowIso = new Date().toISOString()
-
-  // ✅ знайти запис по External Order ID
-  const findRes = await airtableFindRecordIdByExternalOrderId(external_order_id)
-
-  if (!findRes.ok) {
-    // не валимо webhook — повертаємо 200 щоб Whitepay не ретраїв нескінченно
     return sendJson(res, 200, {
       ok: true,
-      handled: "airtable_lookup_failed",
+      handled: "updated",
+      status: statusUpper,
+      crmStatus,
+      recordId: rec.id,
+      whitepay_order_id,
+      external_order_id,
+    })
+  } catch (e) {
+    return sendJson(res, 200, {
+      ok: true,
+      handled: "airtable_error",
       status: statusUpper,
       crmStatus,
       whitepay_order_id,
       external_order_id,
-      airtable: findRes,
+      airtable_error: String(e?.message || e),
+      airtable_details: e?.details || null,
     })
   }
-
-  // ✅ апдейт запису
-  const fieldsToUpdate = {
-    Status: crmStatus,
-    "Whitepay Order ID": whitepay_order_id || "",
-    "Webhook Payload": JSON.stringify(body),
-  }
-
-  if (crmStatus === "paid") {
-    fieldsToUpdate["Paid At"] = nowIso
-  }
-
-  const updRes = await airtableUpdateRecord(findRes.recordId, fieldsToUpdate)
-
-  return sendJson(res, 200, {
-    ok: true,
-    handled: crmStatus === "paid" ? "paid" : "updated",
-    status: statusUpper,
-    crmStatus,
-    whitepay_order_id,
-    external_order_id,
-    airtable: updRes,
-  })
 }
