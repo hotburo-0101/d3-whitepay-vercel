@@ -161,7 +161,8 @@ module.exports = async (req, res) => {
       "Tariff Title": tariffTitle,
       "Amount USDT": Number(amount),
       "currency": "USDT",
-      "status": "pending",
+      // Важливо: статуси тримаємо в одному форматі з webhook (PENDING/PAID/...)
+      "status": "PENDING",
       "Acquiring URL": acquiring_url,
       "customer_name": name || "",
     }
