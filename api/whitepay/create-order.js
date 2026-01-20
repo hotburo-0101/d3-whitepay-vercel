@@ -150,22 +150,27 @@ module.exports = async (req, res) => {
   try {
     // IMPORTANT: робимо поля максимально “безпечні”.
     // Навіть якщо частина колонок називається інакше — запис все одно з’явиться завдяки Name.
-    const fields = {
-      "Name": `${tariffTitle} — ${email}`,              // primary field (видно завжди)
-      "email": email,
-      "phone": phone || "",
-      "provider": "whitepay",
-      "External Order ID": external_order_id,
-      "Whitepay Order ID": String(whitepay_order_id),
-      "Tariff ID": tariffId,
-      "Tariff Title": tariffTitle,
-      "Amount USDT": Number(amount),
-      "currency": "USDT",
-      // Важливо: статуси тримаємо в одному форматі з webhook (PENDING/PAID/...)
-      "status": "PENDING",
-      "Acquiring URL": acquiring_url,
-      "customer_name": name || "",
-    }
+const fields = {
+  email: email,
+  phone: phone || "",
+  provider: "whitepay",
+
+  "External Order ID": external_order_id,
+  "Whitepay Order ID": String(whitepay_order_id),
+
+  "Tariff ID": tariffId,
+  "Tariff Title": tariffTitle,
+
+  "Amount USDT": Number(amount),
+  currency: "USDT",
+
+  status: "PENDING",
+  "Acquiring URL": acquiring_url,
+
+  customer_name: name || "",
+  created_at: new Date().toISOString(),
+};
+
 
     const at = await airtableCreate(fields)
     console.log("Airtable created:", at?.id, at?.createdTime)
