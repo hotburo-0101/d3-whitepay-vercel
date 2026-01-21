@@ -98,7 +98,7 @@ module.exports = async (req, res) => {
   if (!email) return sendJson(res, 400, { error: "Email is required" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-  const amountUah = Number(TARIFFS[tariffId].uah) // грн
+  const amountUah = 10 // грн
   const amountKop = Math.round(amountUah * 100) // копійки
   const tariffTitle = TARIFFS[tariffId].title
 
