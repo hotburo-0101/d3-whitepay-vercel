@@ -1,7 +1,7 @@
 const TARIFFS = {
-  base: { title: "База", usd: 11, uah: 12999, glow: "white" },
-  ground: { title: "Ґрунт", usd: 11, uah: 20999, glow: "green" },
-  foundation: { title: "Фундамент", usd: 11, uah: 33999, glow: "yellow" },
+  base: { title: "База", usd: 299, uah: 12999 },
+  ground: { title: "Ґрунт", usd: 499, uah: 20999 },
+  foundation: { title: "Фундамент", usd: 799, uah: 33999 },
 }
 
 function sendJson(res, status, data) {
