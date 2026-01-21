@@ -20,23 +20,78 @@ function calcSignature(body, secret) {
 }
 
 function mapWhitepayStatusToCrm(statusUpper) {
-  // Підлаштовано під CRM-статуси
   if (statusUpper === "COMPLETE" || statusUpper === "PAID") return "PAID"
-  if (statusUpper === "FAILED" || statusUpper === "CANCELED" || statusUpper === "CANCELLED" || statusUpper === "EXPIRED")
+  if (
+    statusUpper === "FAILED" ||
+    statusUpper === "CANCELED" ||
+    statusUpper === "CANCELLED" ||
+    statusUpper === "EXPIRED"
+  )
     return "FAILED"
   return "PENDING"
 }
 
+// ====== Resend templates + TG links ======
+const TARIFFS = {
+  base: { title: "База", tgEnv: "TG_LINK_BASE", tplEnv: "RESEND_TEMPLATE_BASE" },
+  ground: { title: "Ґрунт", tgEnv: "TG_LINK_GROUND", tplEnv: "RESEND_TEMPLATE_GROUND" },
+  foundation: { title: "Фундамент", tgEnv: "TG_LINK_FOUNDATION", tplEnv: "RESEND_TEMPLATE_FOUNDATION" },
+}
+
+function pickTariff(tariffId) {
+  return TARIFFS[String(tariffId || "").trim()] || null
+}
+
+async function resendSendTemplate({ to, from, subject, templateIdOrAlias, variables }) {
+  const key = process.env.RESEND_API_KEY
+  if (!key) throw new Error("Missing RESEND_API_KEY")
+
+  const payload = {
+    from,
+    to,
+    subject,
+    template: {
+      id: templateIdOrAlias,
+      variables: variables || {},
+    },
+  }
+
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const text = await r.text()
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    data = { raw: text }
+  }
+
+  if (!r.ok) {
+    const msg = data?.message || data?.error || `Resend error (${r.status})`
+    const err = new Error(msg)
+    err.details = data
+    err.status = r.status
+    throw err
+  }
+
+  return data
+}
+
+// ====== Airtable helpers ======
 async function airtableFindByExternalOrderId({ baseId, tableName, token, externalOrderId }) {
   const formula = `{External Order ID}="${String(externalOrderId).replace(/"/g, '\\"')}"`
   const url =
     `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}` +
     `?maxRecords=1&filterByFormula=${encodeURIComponent(formula)}`
 
-  const r = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  const r = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${token}` } })
   const data = await r.json().catch(() => null)
   if (!r.ok) {
     const err = new Error("Airtable find failed")
@@ -53,10 +108,7 @@ async function airtableFindByWhitepayOrderId({ baseId, tableName, token, whitepa
     `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}` +
     `?maxRecords=1&filterByFormula=${encodeURIComponent(formula)}`
 
-  const r = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  const r = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${token}` } })
   const data = await r.json().catch(() => null)
   if (!r.ok) {
     const err = new Error("Airtable find failed")
@@ -71,10 +123,7 @@ async function airtableUpdateRecord({ baseId, tableName, token, recordId, fields
   const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableName)}/${encodeURIComponent(recordId)}`
   const r = await fetch(url, {
     method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ fields }),
   })
   const data = await r.json().catch(() => null)
@@ -101,16 +150,13 @@ module.exports = async (req, res) => {
   const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN
   const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
   const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
+  const EMAIL_FROM = process.env.EMAIL_FROM
 
-  if (!WHITEPAY_WEBHOOK_SECRET) {
-    return sendJson(res, 500, { error: "Missing env var WHITEPAY_WEBHOOK_SECRET" })
-  }
+  if (!WHITEPAY_WEBHOOK_SECRET) return sendJson(res, 500, { error: "Missing WHITEPAY_WEBHOOK_SECRET" })
   if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
-    return sendJson(res, 500, {
-      error: "Missing Airtable env vars",
-      required: ["AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE"],
-    })
+    return sendJson(res, 500, { error: "Missing Airtable env vars" })
   }
+  if (!EMAIL_FROM) return sendJson(res, 500, { error: "EMAIL_FROM missing" })
 
   let body = req.body
   if (!body || typeof body !== "object") {
@@ -121,14 +167,8 @@ module.exports = async (req, res) => {
     }
   }
 
-  const signature =
-    req.headers["signature"] ||
-    req.headers["Signature"] ||
-    req.headers["SIGNATURE"] ||
-    ""
-
+  const signature = req.headers["signature"] || req.headers["Signature"] || req.headers["SIGNATURE"] || ""
   const expected = calcSignature(body, WHITEPAY_WEBHOOK_SECRET)
-
   if (!signature || String(signature) !== expected) {
     return sendJson(res, 401, { error: "Invalid signature" })
   }
@@ -141,7 +181,6 @@ module.exports = async (req, res) => {
 
   const crmStatus = mapWhitepayStatusToCrm(statusUpper)
 
-  // ✅ Знайдемо запис у Airtable і оновимо статус
   try {
     let rec = null
 
@@ -164,7 +203,6 @@ module.exports = async (req, res) => {
     }
 
     if (!rec) {
-      // Не валимо webhook — Whitepay не має ретраїти нескінченно
       return sendJson(res, 200, {
         ok: true,
         handled: "no_record",
@@ -175,6 +213,9 @@ module.exports = async (req, res) => {
       })
     }
 
+    const prevStatus = String(rec.fields?.status || "")
+
+    // 1) Оновлюємо Airtable
     await airtableUpdateRecord({
       baseId: AIRTABLE_BASE_ID,
       tableName: AIRTABLE_TABLE,
@@ -182,16 +223,70 @@ module.exports = async (req, res) => {
       recordId: rec.id,
       fields: {
         status: crmStatus,
+        provider: "whitepay",
+        currency: "CRYPTO",
         "Whitepay Order ID": whitepay_order_id || rec.fields?.["Whitepay Order ID"] || "",
         "External Order ID": external_order_id || rec.fields?.["External Order ID"] || "",
       },
     })
+
+    // 2) Якщо оплатили — шлемо лист один раз
+    let emailHandled = "skipped"
+
+    if (crmStatus === "PAID") {
+      if (prevStatus === "PAID_EMAIL_SENT") {
+        emailHandled = "already_sent"
+      } else {
+        const to = String(rec.fields?.email || "").trim()
+        const tariffId = String(rec.fields?.["Tariff ID"] || "").trim()
+        const name = String(rec.fields?.customer_name || "").trim()
+
+        if (!to || !tariffId) {
+          emailHandled = "missing_email_or_tariff"
+        } else {
+          const t = pickTariff(tariffId)
+          if (!t) {
+            emailHandled = "unknown_tariff"
+          } else {
+            const tgLink = process.env[t.tgEnv]
+            const templateIdOrAlias = process.env[t.tplEnv]
+            if (!tgLink || !templateIdOrAlias) {
+              // 500 -> можна ретраїти, але whitepay не гарантує нескінченні ретраї
+              emailHandled = "missing_env"
+            } else {
+              await resendSendTemplate({
+                to,
+                from: EMAIL_FROM,
+                subject: `D3 Education — доступ активовано (${t.title})`,
+                templateIdOrAlias,
+                variables: {
+                  customer_name: name || "",
+                  tariff_title: t.title,
+                  tg_link: tgLink,
+                },
+              })
+
+              await airtableUpdateRecord({
+                baseId: AIRTABLE_BASE_ID,
+                tableName: AIRTABLE_TABLE,
+                token: AIRTABLE_TOKEN,
+                recordId: rec.id,
+                fields: { status: "PAID_EMAIL_SENT" },
+              })
+
+              emailHandled = "sent"
+            }
+          }
+        }
+      }
+    }
 
     return sendJson(res, 200, {
       ok: true,
       handled: "updated",
       status: statusUpper,
       crmStatus,
+      emailHandled,
       recordId: rec.id,
       whitepay_order_id,
       external_order_id,
