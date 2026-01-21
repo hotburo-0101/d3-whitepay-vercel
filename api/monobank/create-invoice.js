@@ -1,5 +1,3 @@
-Ось моно банк, поправ пліз 
- 
 const crypto = require("crypto")
 
 const TARIFFS = {
