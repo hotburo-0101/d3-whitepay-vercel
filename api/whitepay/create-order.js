@@ -4,6 +4,9 @@ const TARIFFS = {
   foundation: { title: "Фундамент", usd: 799, uah: 33999, glow: "yellow" },
 }
 
+// ✅ TEST MODE: whitepay = 1 USDT (для всіх тарифів)
+const IS_TEST = process.env.PAYMENTS_TEST_MODE === "true"
+
 function sendJson(res, status, data) {
   res.statusCode = status
   res.setHeader("Content-Type", "application/json")
@@ -22,6 +25,11 @@ function safeString(v, max = 255) {
   return s.length > max ? s.slice(0, max) : s
 }
 
+function isValidEmail(v) {
+  const s = String(v || "").trim()
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(s)
+}
+
 function makeExternalOrderId(tariffId) {
   return `d3_${tariffId}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`
 }
@@ -32,10 +40,14 @@ async function airtableCreate(fields) {
   const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
 
   if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
-    throw new Error("Missing Airtable env vars (AIRTABLE_TOKEN / AIRTABLE_BASE_ID / AIRTABLE_TABLE)")
+    throw new Error(
+      "Missing Airtable env vars (AIRTABLE_TOKEN / AIRTABLE_BASE_ID / AIRTABLE_TABLE)"
+    )
   }
 
-  const url = `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(AIRTABLE_TABLE)}`
+  const url = `https://api.airtable.com/v0/${encodeURIComponent(
+    AIRTABLE_BASE_ID
+  )}/${encodeURIComponent(AIRTABLE_TABLE)}`
 
   const r = await fetch(url, {
     method: "POST",
@@ -48,10 +60,17 @@ async function airtableCreate(fields) {
 
   const text = await r.text()
   let data
-  try { data = JSON.parse(text) } catch (e) { data = { raw: text } }
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    data = { raw: text }
+  }
 
   if (!r.ok) {
-    const msg = data?.error?.message || data?.error || `Airtable create failed (${r.status})`
+    const msg =
+      data?.error?.message ||
+      data?.error ||
+      `Airtable create failed (${r.status})`
     throw new Error(msg)
   }
 
@@ -65,7 +84,8 @@ module.exports = async (req, res) => {
     res.statusCode = 204
     return res.end()
   }
-  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" })
+  if (req.method !== "POST")
+    return sendJson(res, 405, { error: "Method not allowed" })
 
   const WHITEPAY_API_TOKEN = process.env.WHITEPAY_API_TOKEN
   const WHITEPAY_SLUG = process.env.WHITEPAY_SLUG
@@ -93,25 +113,41 @@ module.exports = async (req, res) => {
   const name = safeString(body.name, 255)
   const phone = safeString(body.phone, 64)
 
-  if (!TARIFFS[tariffId]) return sendJson(res, 400, { error: "Invalid tariffId" })
+  const tariff = TARIFFS[tariffId]
+  if (!tariff) return sendJson(res, 400, { error: "Invalid tariffId" })
   if (!email) return sendJson(res, 400, { error: "Email is required" })
+  if (!isValidEmail(email))
+    return sendJson(res, 400, { error: "Invalid email" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-  const amount = TARIFFS[tariffId].usd
-  const tariffTitle = TARIFFS[tariffId].title
+
+  // ✅ ТЕСТ: 1 USDT, ПРОД: тариф.usd
+  const amount = IS_TEST ? 1 : Number(tariff.usd)
+  const tariffTitle = tariff.title
 
   const paymentDesc = `Оплата за тариф "${tariffTitle}"`
 
   // 1) Create WhitePay order
-  const wpUrl = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(WHITEPAY_SLUG)}`
+  const wpUrl = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(
+    WHITEPAY_SLUG
+  )}`
+
+  const successUrl = `${SITE_URL}/payment-success?tariff=${encodeURIComponent(
+    tariffId
+  )}&order=${encodeURIComponent(external_order_id)}&provider=whitepay`
+
+  const failureUrl = `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(
+    tariffId
+  )}&order=${encodeURIComponent(external_order_id)}&provider=whitepay`
+
   const wpPayload = {
     amount: String(amount),
     currency: "USDT",
     external_order_id,
     email,
     description: `${paymentDesc} — D3 Education`,
-    successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-    failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
+    successful_link: successUrl,
+    failure_link: failureUrl,
     form_additional_data: paymentDesc,
   }
 
@@ -127,15 +163,26 @@ module.exports = async (req, res) => {
       body: JSON.stringify(wpPayload),
     })
   } catch (e) {
-    return sendJson(res, 502, { error: "Whitepay request failed", details: String(e) })
+    return sendJson(res, 502, {
+      error: "Whitepay request failed",
+      details: String(e),
+    })
   }
 
   const wpText = await wpRes.text()
   let wpData
-  try { wpData = JSON.parse(wpText) } catch (e) { wpData = { raw: wpText } }
+  try {
+    wpData = JSON.parse(wpText)
+  } catch (e) {
+    wpData = { raw: wpText }
+  }
 
   if (!wpRes.ok) {
-    return sendJson(res, 502, { error: "Whitepay create order failed", status: wpRes.status, data: wpData })
+    return sendJson(res, 502, {
+      error: "Whitepay create order failed",
+      status: wpRes.status,
+      data: wpData,
+    })
   }
 
   const acquiring_url = wpData?.order?.acquiring_url
@@ -143,39 +190,40 @@ module.exports = async (req, res) => {
   const status = wpData?.order?.status
 
   if (!acquiring_url || !whitepay_order_id) {
-    return sendJson(res, 502, { error: "Whitepay response missing acquiring_url/id", data: wpData })
+    return sendJson(res, 502, {
+      error: "Whitepay response missing acquiring_url/id",
+      data: wpData,
+    })
   }
 
   // 2) Create Airtable record (PENDING)
   try {
-    // IMPORTANT: робимо поля максимально “безпечні”.
-    // Навіть якщо частина колонок називається інакше — запис все одно з’явиться завдяки Name.
-const fields = {
-  email: email,
-  phone: phone || "",
-  provider: "whitepay",
+    const fields = {
+      customer_name: name || "",
+      email: email,
+      phone: phone || "",
+      provider: "whitepay",
 
-  "External Order ID": external_order_id,
-  "Whitepay Order ID": String(whitepay_order_id),
+      "External Order ID": external_order_id,
+      "Whitepay Order ID": String(whitepay_order_id),
 
-  "Tariff ID": tariffId,
-  "Tariff Title": tariffTitle,
+      "Tariff ID": tariffId,
+      "Tariff Title": tariffTitle,
 
-  "Amount USDT": Number(amount),
-  currency: "USDT",
+      "Amount USDT": Number(amount),
+      currency: "USDT",
 
-  status: "PENDING",
-  "Acquiring URL": acquiring_url,
+      status: "PENDING",
+      "Acquiring URL": String(acquiring_url),
 
-  customer_name: name || "",
-};
-
+      created_at: new Date().toISOString(),
+    }
 
     const at = await airtableCreate(fields)
-    console.log("Airtable created:", at?.id, at?.createdTime)
 
     return sendJson(res, 200, {
       ok: true,
+      provider: "whitepay",
       tariffId,
       amount_usdt: amount,
       external_order_id,
@@ -183,19 +231,23 @@ const fields = {
       status,
       acquiring_url,
       airtable_record_id: at?.id || null,
+      success_url: successUrl,
+      fail_url: failureUrl,
+      test_mode: IS_TEST,
     })
   } catch (e) {
-    console.log("Airtable error:", String(e))
-    // ВАЖЛИВО: навіть якщо Airtable впав, оплату ми не блокуємо
+    // оплату не блокуємо
     return sendJson(res, 200, {
       ok: true,
+      provider: "whitepay",
       tariffId,
       amount_usdt: amount,
       external_order_id,
       whitepay_order_id,
       status,
       acquiring_url,
-      airtable_error: String(e),
+      airtable_error: String(e?.message || e),
+      test_mode: IS_TEST,
     })
   }
 }
