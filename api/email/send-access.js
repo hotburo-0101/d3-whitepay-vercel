@@ -56,6 +56,10 @@ function pickTariff(tariffId) {
   return TARIFFS[String(tariffId || "").trim()] || null
 }
 
+function normalizeStatus(s) {
+  return String(s || "").trim().toUpperCase()
+}
+
 // ====== Resend ======
 async function resendSendTemplate({ to, from, subject, templateIdOrAlias, variables }) {
   const key = process.env.RESEND_API_KEY
@@ -98,10 +102,8 @@ async function resendSendTemplate({ to, from, subject, templateIdOrAlias, variab
 // ====== Airtable helpers ======
 function airtableBaseUrl() {
   const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
-  const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
-  if (!AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
-    throw new Error("Missing Airtable env vars (AIRTABLE_BASE_ID / AIRTABLE_TABLE)")
-  }
+  const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE // має бути TABLE ID або table name (краще ID)
+  if (!AIRTABLE_BASE_ID || !AIRTABLE_TABLE) throw new Error("Missing AIRTABLE_BASE_ID / AIRTABLE_TABLE")
   return `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(AIRTABLE_TABLE)}`
 }
 
@@ -114,56 +116,35 @@ function airtableHeaders() {
   }
 }
 
-async function airtableFetchJson(url, opts = {}) {
-  const r = await fetch(url, opts)
-  const text = await r.text()
-  let data
-  try { data = JSON.parse(text) } catch { data = { raw: text } }
-  return { ok: r.ok, status: r.status, text, data }
-}
-
 async function airtableFindByRecordId(recordId) {
   const url = `${airtableBaseUrl()}/${encodeURIComponent(recordId)}`
-  const out = await airtableFetchJson(url, { headers: airtableHeaders() })
-  if (!out.ok) {
-    const err = new Error(`Airtable read failed (${out.status}): ${out.text}`)
-    err.airtable = { url, status: out.status, body: out.data }
-    throw err
-  }
-  return out.data
+  const r = await fetch(url, { headers: airtableHeaders() })
+  const text = await r.text()
+  if (!r.ok) throw new Error(`Airtable read failed (${r.status}): ${text}`)
+  return JSON.parse(text)
 }
 
 async function airtableFindByExternalOrderId(externalOrderId) {
   const base = airtableBaseUrl()
   const filter = `{External Order ID}="${String(externalOrderId).replace(/"/g, '\\"')}"`
   const url = `${base}?maxRecords=1&filterByFormula=${encodeURIComponent(filter)}`
-  const out = await airtableFetchJson(url, { headers: airtableHeaders() })
-  if (!out.ok) {
-    const err = new Error(`Airtable find failed (${out.status}): ${out.text}`)
-    err.airtable = { url, status: out.status, body: out.data }
-    throw err
-  }
-  const rec = Array.isArray(out.data.records) && out.data.records.length ? out.data.records[0] : null
-  return rec
+  const r = await fetch(url, { headers: airtableHeaders() })
+  const text = await r.text()
+  if (!r.ok) throw new Error(`Airtable find failed (${r.status}): ${text}`)
+  const data = JSON.parse(text)
+  return Array.isArray(data.records) && data.records.length ? data.records[0] : null
 }
 
 async function airtablePatchRecord(recordId, fields) {
   const url = `${airtableBaseUrl()}/${encodeURIComponent(recordId)}`
-  const out = await airtableFetchJson(url, {
+  const r = await fetch(url, {
     method: "PATCH",
     headers: airtableHeaders(),
     body: JSON.stringify({ fields }),
   })
-  if (!out.ok) {
-    const err = new Error(`Airtable patch failed (${out.status}): ${out.text}`)
-    err.airtable = { url, status: out.status, body: out.data }
-    throw err
-  }
-  return out.data
-}
-
-function normalizeStatus(s) {
-  return String(s || "").trim().toUpperCase()
+  const text = await r.text()
+  if (!r.ok) throw new Error(`Airtable patch failed (${r.status}): ${text}`)
+  return JSON.parse(text)
 }
 
 module.exports = async (req, res) => {
@@ -175,79 +156,57 @@ module.exports = async (req, res) => {
   }
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" })
 
+  // ===== auth =====
   const MANUAL_EMAIL_SECRET = process.env.MANUAL_EMAIL_SECRET
   if (!MANUAL_EMAIL_SECRET) return sendJson(res, 500, { error: "MANUAL_EMAIL_SECRET missing" })
 
   const body = await getJsonBody(req)
   if (body.__invalid_json) return sendJson(res, 400, { error: "Invalid JSON body", raw: body.__raw })
 
-  // auth: header X-Manual-Secret або body.secret
   const headerSecret = req.headers["x-manual-secret"]
   const provided = String(headerSecret || body.secret || "")
+  if (!timingSafeEq(provided, MANUAL_EMAIL_SECRET)) return sendJson(res, 401, { error: "Unauthorized" })
 
-  if (!timingSafeEq(provided, MANUAL_EMAIL_SECRET)) {
-    return sendJson(res, 401, { error: "Unauthorized" })
-  }
-
-  // input: recordId або externalOrderId
-  const recordId = safeString(body.recordId || body.airtable_record_id || "", 128)
-  const externalOrderId = safeString(body.externalOrderId || body.external_order_id || "", 255)
-
-  // супер-важливий debug (щоб у Vercel було видно що реально прийшло)
-  console.log("send-access input:", {
-    recordId,
-    externalOrderId,
-    base: process.env.AIRTABLE_BASE_ID,
-    table: process.env.AIRTABLE_TABLE,
-    hasToken: Boolean(process.env.AIRTABLE_TOKEN),
-  })
+  // ===== input =====
+  const recordId = safeString(body.recordId || "", 128)
+  const externalOrderId = safeString(body.externalOrderId || "", 255)
 
   if (!recordId && !externalOrderId) {
     return sendJson(res, 400, { error: "Provide recordId or externalOrderId" })
   }
 
-  // 1) read record
+  // ===== read record =====
   let rec
   try {
-    rec = recordId
-      ? await airtableFindByRecordId(recordId)
-      : await airtableFindByExternalOrderId(externalOrderId)
+    rec = recordId ? await airtableFindByRecordId(recordId) : await airtableFindByExternalOrderId(externalOrderId)
   } catch (e) {
-    console.log("Airtable read error:", {
-      message: String(e?.message || e),
-      airtable: e?.airtable || null,
-    })
-    return sendJson(res, 502, {
-      error: "Airtable read failed",
-      details: String(e?.message || e),
-      airtable: e?.airtable || null,
-    })
+    return sendJson(res, 502, { error: "Airtable read failed", details: String(e?.message || e) })
   }
-
   if (!rec) return sendJson(res, 404, { error: "Record not found" })
 
   const fields = rec.fields || {}
   const status = normalizeStatus(fields.status)
 
-  // ✅ спочатку ідемпотентність
+  // ✅ спочатку перевіряємо що вже відправляли
   if (status === "PAID_EMAIL_SENT") {
     return sendJson(res, 200, { ok: true, already_sent: true, recordId: rec.id })
   }
 
-  // ✅ потім перевірка paid
+  // ✅ слати можна тільки коли PAID
   if (status !== "PAID") {
-    return sendJson(res, 409, { error: "Status is not PAID", status })
+    return sendJson(res, 409, { error: "Status is not PAID", status, recordId: rec.id })
   }
 
+  // ===== prepare email =====
   const email = String(fields.email || "").trim()
   const name = String(fields.customer_name || "").trim()
   const tariffId = String(fields["Tariff ID"] || "").trim()
 
-  if (!email) return sendJson(res, 400, { error: "Record missing email" })
-  if (!tariffId) return sendJson(res, 400, { error: "Record missing Tariff ID" })
+  if (!email) return sendJson(res, 400, { error: "Record missing email", recordId: rec.id })
+  if (!tariffId) return sendJson(res, 400, { error: "Record missing Tariff ID", recordId: rec.id })
 
   const t = pickTariff(tariffId)
-  if (!t) return sendJson(res, 400, { error: "Unknown tariff", tariffId })
+  if (!t) return sendJson(res, 400, { error: "Unknown tariff", tariffId, recordId: rec.id })
 
   const tgLink = process.env[t.tgEnv]
   const templateIdOrAlias = process.env[t.tplEnv]
@@ -259,7 +218,7 @@ module.exports = async (req, res) => {
 
   const subject = safeString(`D3 Education — доступ активовано (${t.title})`, 255)
 
-  // 4) send email
+  // ===== send email =====
   let resendOut
   try {
     resendOut = await resendSendTemplate({
@@ -274,11 +233,6 @@ module.exports = async (req, res) => {
       },
     })
   } catch (e) {
-    console.log("Resend send error:", {
-      message: String(e?.message || e),
-      status: e?.status || null,
-      details: e?.details || null,
-    })
     return sendJson(res, 502, {
       error: "Resend send failed",
       message: String(e?.message || e),
@@ -287,21 +241,17 @@ module.exports = async (req, res) => {
     })
   }
 
-  // 5) mark as sent
+  // ===== mark sent =====
   try {
     await airtablePatchRecord(rec.id, { status: "PAID_EMAIL_SENT" })
   } catch (e) {
-    console.log("Airtable patch error (email already sent):", {
-      message: String(e?.message || e),
-      airtable: e?.airtable || null,
-    })
     return sendJson(res, 200, {
       ok: true,
       sent: true,
       resend: resendOut,
       warn: "Email sent, but Airtable status update failed",
       details: String(e?.message || e),
-      airtable: e?.airtable || null,
+      recordId: rec.id,
     })
   }
 
