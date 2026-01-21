@@ -99,7 +99,9 @@ async function resendSendTemplate({ to, from, subject, templateIdOrAlias, variab
 function airtableBaseUrl() {
   const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID
   const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE
-  if (!AIRTABLE_BASE_ID || !AIRTABLE_TABLE) throw new Error("Missing Airtable env vars (AIRTABLE_BASE_ID / AIRTABLE_TABLE)")
+  if (!AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
+    throw new Error("Missing Airtable env vars (AIRTABLE_BASE_ID / AIRTABLE_TABLE)")
+  }
   return `https://api.airtable.com/v0/${encodeURIComponent(AIRTABLE_BASE_ID)}/${encodeURIComponent(AIRTABLE_TABLE)}`
 }
 
@@ -112,41 +114,52 @@ function airtableHeaders() {
   }
 }
 
-async function airtableFindByRecordId(recordId) {
-  const url = `${airtableBaseUrl()}/${encodeURIComponent(recordId)}`
-  const r = await fetch(url, { headers: airtableHeaders() })
+async function airtableFetchJson(url, opts = {}) {
+  const r = await fetch(url, opts)
   const text = await r.text()
   let data
   try { data = JSON.parse(text) } catch { data = { raw: text } }
-  if (!r.ok) throw new Error(`Airtable read failed (${r.status}): ${text}`)
-  return data
+  return { ok: r.ok, status: r.status, text, data }
+}
+
+async function airtableFindByRecordId(recordId) {
+  const url = `${airtableBaseUrl()}/${encodeURIComponent(recordId)}`
+  const out = await airtableFetchJson(url, { headers: airtableHeaders() })
+  if (!out.ok) {
+    const err = new Error(`Airtable read failed (${out.status}): ${out.text}`)
+    err.airtable = { url, status: out.status, body: out.data }
+    throw err
+  }
+  return out.data
 }
 
 async function airtableFindByExternalOrderId(externalOrderId) {
   const base = airtableBaseUrl()
   const filter = `{External Order ID}="${String(externalOrderId).replace(/"/g, '\\"')}"`
   const url = `${base}?maxRecords=1&filterByFormula=${encodeURIComponent(filter)}`
-  const r = await fetch(url, { headers: airtableHeaders() })
-  const text = await r.text()
-  let data
-  try { data = JSON.parse(text) } catch { data = { raw: text } }
-  if (!r.ok) throw new Error(`Airtable find failed (${r.status}): ${text}`)
-  const rec = Array.isArray(data.records) && data.records.length ? data.records[0] : null
+  const out = await airtableFetchJson(url, { headers: airtableHeaders() })
+  if (!out.ok) {
+    const err = new Error(`Airtable find failed (${out.status}): ${out.text}`)
+    err.airtable = { url, status: out.status, body: out.data }
+    throw err
+  }
+  const rec = Array.isArray(out.data.records) && out.data.records.length ? out.data.records[0] : null
   return rec
 }
 
 async function airtablePatchRecord(recordId, fields) {
   const url = `${airtableBaseUrl()}/${encodeURIComponent(recordId)}`
-  const r = await fetch(url, {
+  const out = await airtableFetchJson(url, {
     method: "PATCH",
     headers: airtableHeaders(),
     body: JSON.stringify({ fields }),
   })
-  const text = await r.text()
-  let data
-  try { data = JSON.parse(text) } catch { data = { raw: text } }
-  if (!r.ok) throw new Error(`Airtable patch failed (${r.status}): ${text}`)
-  return data
+  if (!out.ok) {
+    const err = new Error(`Airtable patch failed (${out.status}): ${out.text}`)
+    err.airtable = { url, status: out.status, body: out.data }
+    throw err
+  }
+  return out.data
 }
 
 function normalizeStatus(s) {
@@ -171,34 +184,59 @@ module.exports = async (req, res) => {
   // auth: header X-Manual-Secret або body.secret
   const headerSecret = req.headers["x-manual-secret"]
   const provided = String(headerSecret || body.secret || "")
-  if (!timingSafeEq(provided, MANUAL_EMAIL_SECRET)) return sendJson(res, 401, { error: "Unauthorized" })
+
+  if (!timingSafeEq(provided, MANUAL_EMAIL_SECRET)) {
+    return sendJson(res, 401, { error: "Unauthorized" })
+  }
 
   // input: recordId або externalOrderId
   const recordId = safeString(body.recordId || body.airtable_record_id || "", 128)
   const externalOrderId = safeString(body.externalOrderId || body.external_order_id || "", 255)
-  if (!recordId && !externalOrderId) return sendJson(res, 400, { error: "Provide recordId or externalOrderId" })
+
+  // супер-важливий debug (щоб у Vercel було видно що реально прийшло)
+  console.log("send-access input:", {
+    recordId,
+    externalOrderId,
+    base: process.env.AIRTABLE_BASE_ID,
+    table: process.env.AIRTABLE_TABLE,
+    hasToken: Boolean(process.env.AIRTABLE_TOKEN),
+  })
+
+  if (!recordId && !externalOrderId) {
+    return sendJson(res, 400, { error: "Provide recordId or externalOrderId" })
+  }
 
   // 1) read record
   let rec
   try {
-    rec = recordId ? await airtableFindByRecordId(recordId) : await airtableFindByExternalOrderId(externalOrderId)
+    rec = recordId
+      ? await airtableFindByRecordId(recordId)
+      : await airtableFindByExternalOrderId(externalOrderId)
   } catch (e) {
-    return sendJson(res, 502, { error: "Airtable read failed", details: String(e?.message || e) })
+    console.log("Airtable read error:", {
+      message: String(e?.message || e),
+      airtable: e?.airtable || null,
+    })
+    return sendJson(res, 502, {
+      error: "Airtable read failed",
+      details: String(e?.message || e),
+      airtable: e?.airtable || null,
+    })
   }
+
   if (!rec) return sendJson(res, 404, { error: "Record not found" })
 
   const fields = rec.fields || {}
   const status = normalizeStatus(fields.status)
 
-  // 2) send only if PAID
-  if (status !== "PAID") {
-    return sendJson(res, 409, { error: "Status is not PAID", status })
+  // ✅ спочатку ідемпотентність
+  if (status === "PAID_EMAIL_SENT") {
+    return sendJson(res, 200, { ok: true, already_sent: true, recordId: rec.id })
   }
 
-  // 3) idempotency: do not resend
-  const paidSent = normalizeStatus(fields.status) === "PAID_EMAIL_SENT"
-  if (paidSent) {
-    return sendJson(res, 200, { ok: true, already_sent: true })
+  // ✅ потім перевірка paid
+  if (status !== "PAID") {
+    return sendJson(res, 409, { error: "Status is not PAID", status })
   }
 
   const email = String(fields.email || "").trim()
@@ -236,6 +274,11 @@ module.exports = async (req, res) => {
       },
     })
   } catch (e) {
+    console.log("Resend send error:", {
+      message: String(e?.message || e),
+      status: e?.status || null,
+      details: e?.details || null,
+    })
     return sendJson(res, 502, {
       error: "Resend send failed",
       message: String(e?.message || e),
@@ -244,17 +287,21 @@ module.exports = async (req, res) => {
     })
   }
 
-  // 5) mark as sent (so it won't resend)
+  // 5) mark as sent
   try {
     await airtablePatchRecord(rec.id, { status: "PAID_EMAIL_SENT" })
   } catch (e) {
-    // email sent, but status not updated
+    console.log("Airtable patch error (email already sent):", {
+      message: String(e?.message || e),
+      airtable: e?.airtable || null,
+    })
     return sendJson(res, 200, {
       ok: true,
       sent: true,
       resend: resendOut,
       warn: "Email sent, but Airtable status update failed",
       details: String(e?.message || e),
+      airtable: e?.airtable || null,
     })
   }
 
