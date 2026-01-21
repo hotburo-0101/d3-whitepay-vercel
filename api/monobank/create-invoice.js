@@ -1,9 +1,24 @@
 const crypto = require("crypto")
 
 const TARIFFS = {
-  base: { title: "База", usd: 299, uah: 10, icon: "https://framerusercontent.com/images/HSaFjfNthR65bMjzLtrVHtskgE.png" },
-  ground: { title: "Ґрунт", usd: 499, uah: 10, icon: "https://framerusercontent.com/images/lU1NmBLgPCHrBUlG0P90JHH5sNs.png" },
-  foundation: { title: "Фундамент", usd: 799, uah: 10, icon: "https://framerusercontent.com/images/kwJutTe19dT4guedyUWDqQKIHzA.png" },
+  base: {
+    title: "База",
+    usd: 299,
+    uah: 12999,
+    icon: "https://framerusercontent.com/images/HSaFjfNthR65bMjzLtrVHtskgE.png",
+  },
+  ground: {
+    title: "Ґрунт",
+    usd: 499,
+    uah: 20999,
+    icon: "https://framerusercontent.com/images/lU1NmBLgPCHrBUlG0P90JHH5sNs.png",
+  },
+  foundation: {
+    title: "Фундамент",
+    usd: 799,
+    uah: 33999,
+    icon: "https://framerusercontent.com/images/kwJutTe19dT4guedyUWDqQKIHzA.png",
+  },
 }
 
 function sendJson(res, status, data) {
