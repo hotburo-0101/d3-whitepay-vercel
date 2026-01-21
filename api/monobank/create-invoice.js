@@ -111,37 +111,46 @@ module.exports = async (req, res) => {
   if (!email) return sendJson(res, 400, { error: "Email is required" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-  const amountUah = 10 // грн
-  const amountKop = Math.round(amountUah * 100) // копійки
+  const amountUah = Number(TARIFFS[tariffId].uah)
+  const amountKop = Math.round(amountUah * 100)
   const tariffTitle = TARIFFS[tariffId].title
 
-  const successUrl = `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}&provider=mono`
-  const failUrl = `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}&provider=mono`
+  const successUrl = `https://d3.education/success`
+  const failUrl = `https://d3.education/error`
 
   const payload = {
-    amount: amountKop,
-    ccy: 980,
-    merchantPaymInfo: {
-      reference: external_order_id, // важливо: по цьому знайдемо рядок в Airtable з вебхука
-      destination: `Оплата за тариф "${tariffTitle}" — D3 Education`,
-      comment: `Оплата за тариф "${tariffTitle}" — D3 Education`,
-      customerEmails: email ? [email] : [],
-      basketOrder: [
-        {
-          name: `D3 Education — ${tariffTitle}`,
-          qty: 1,
-          sum: amountKop,
-          total: amountKop,
-          unit: "шт.",
-          code: external_order_id,
-        },
-      ],
-    },
+  amount: amountKop,
+  ccy: 980,
+
+  merchantPaymInfo: {
+    reference: external_order_id,
+
+    destination: `Оплата за тариф "${tariffTitle}" — D3 Education`,
+    comment: `Оплата за тариф "${tariffTitle}" — D3 Education`,
+
+    customerEmails: email ? [email] : [],
+
     redirectUrl: successUrl,
-    // якщо mono вміє failure redirect окремо у твоєму тарифі/кабінеті — ок, але стандартно є тільки redirectUrl.
-    // failUrl залишаю для твого фронту (якщо прийде статус fail — зловимо в webhook і ти покажеш сторінку по /payment-failed)
-    webHookUrl: `${BACKEND_URL.replace(/\/+$/, "")}/api/monobank/webhook`,
-  }
+    successUrl: successUrl,
+    failUrl: failUrl,
+
+    basketOrder: [
+      {
+        name: `D3 Education — ${tariffTitle}`,
+        qty: 1,
+        sum: amountKop,
+        total: amountKop,
+        unit: "шт.",
+        code: external_order_id,
+      },
+    ],
+  },
+
+  redirectUrl: successUrl,
+
+  webHookUrl: `${BACKEND_URL.replace(/\/+$/, "")}/api/monobank/webhook`,
+}
+
 
   let monoRes
   try {
