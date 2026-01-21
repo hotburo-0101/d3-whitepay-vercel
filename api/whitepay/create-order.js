@@ -110,8 +110,8 @@ module.exports = async (req, res) => {
     external_order_id,
     email,
     description: `${paymentDesc} — D3 Education`,
-    successful_link: `${SITE_URL}/payment-success?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
-    failure_link: `${SITE_URL}/payment-failed?tariff=${encodeURIComponent(tariffId)}&order=${encodeURIComponent(external_order_id)}`,
+    successful_link: `https://d3.education/success`,
+    failure_link: `https://d3.education/error`,
     form_additional_data: paymentDesc,
   }
 
