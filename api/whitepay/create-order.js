@@ -1,11 +1,8 @@
 const TARIFFS = {
-  base: { title: "База", usd: 299, uah: 12999, glow: "white" },
-  ground: { title: "Ґрунт", usd: 499, uah: 20999, glow: "green" },
-  foundation: { title: "Фундамент", usd: 799, uah: 33999, glow: "yellow" },
+  base: { title: "База", usd: 11, uah: 10, glow: "white" },
+  ground: { title: "Ґрунт", usd: 11, uah: 10, glow: "green" },
+  foundation: { title: "Фундамент", usd: 11, uah: 10, glow: "yellow" },
 }
-
-// ✅ TEST MODE: whitepay = 1 USDT (для всіх тарифів)
-const IS_TEST = process.env.PAYMENTS_TEST_MODE === "true"
 
 function sendJson(res, status, data) {
   res.statusCode = status
@@ -120,17 +117,10 @@ module.exports = async (req, res) => {
     return sendJson(res, 400, { error: "Invalid email" })
 
   const external_order_id = makeExternalOrderId(tariffId)
-
-  // ✅ ТЕСТ: 1 USDT, ПРОД: тариф.usd
-  const amount = IS_TEST ? 1 : Number(tariff.usd)
+  const amount = Number(tariff.usd) // USDT
   const tariffTitle = tariff.title
 
   const paymentDesc = `Оплата за тариф "${tariffTitle}"`
-
-  // 1) Create WhitePay order
-  const wpUrl = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(
-    WHITEPAY_SLUG
-  )}`
 
   const successUrl = `${SITE_URL}/payment-success?tariff=${encodeURIComponent(
     tariffId
@@ -140,8 +130,13 @@ module.exports = async (req, res) => {
     tariffId
   )}&order=${encodeURIComponent(external_order_id)}&provider=whitepay`
 
+  // 1) Create WhitePay order
+  const wpUrl = `https://api.whitepay.com/private-api/crypto-orders/${encodeURIComponent(
+    WHITEPAY_SLUG
+  )}`
+
   const wpPayload = {
-    amount: String(amount),
+    amount: amount.toFixed(2), // "11.00"
     currency: "USDT",
     external_order_id,
     email,
@@ -181,7 +176,9 @@ module.exports = async (req, res) => {
     return sendJson(res, 502, {
       error: "Whitepay create order failed",
       status: wpRes.status,
-      data: wpData,
+      response: wpData,
+      raw: wpText,
+      sent: wpPayload,
     })
   }
 
@@ -233,10 +230,9 @@ module.exports = async (req, res) => {
       airtable_record_id: at?.id || null,
       success_url: successUrl,
       fail_url: failureUrl,
-      test_mode: IS_TEST,
     })
   } catch (e) {
-    // оплату не блокуємо
+    // ВАЖЛИВО: навіть якщо Airtable впав, оплату не блокуємо
     return sendJson(res, 200, {
       ok: true,
       provider: "whitepay",
@@ -247,7 +243,6 @@ module.exports = async (req, res) => {
       status,
       acquiring_url,
       airtable_error: String(e?.message || e),
-      test_mode: IS_TEST,
     })
   }
 }
